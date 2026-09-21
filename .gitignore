@@ -1,0 +1,15 @@
+# Android / Gradle
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# 引擎二进制与权重由 CI 在编译时下载注入，不进仓库（权重 50MB）
+app/src/main/jniLibs/arm64-v8a/libpikafish.so
+app/src/main/assets/pikafish.nnue

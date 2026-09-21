@@ -1,0 +1,2 @@
+-keep class com.pikafish.chess.** { *; }
+-dontwarn java.lang.management.**
