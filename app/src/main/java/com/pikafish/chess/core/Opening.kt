@@ -43,7 +43,7 @@ object Opening {
         }
 
         return when {
-            head.isNotEmpty() && tail.isNotEmpty() -> "$head对$tail"
+            head.isNotEmpty() && tail.isNotEmpty() -> "${head}对${tail}"
             head.isNotEmpty() -> head
             tail.isNotEmpty() -> tail
             else -> ""
