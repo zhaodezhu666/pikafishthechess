@@ -181,7 +181,13 @@ class MainActivity : AppCompatActivity() {
         ).append('\n')
         sb.append("CPU 支持 dotprod: ").append(e?.cpuHasDotprod ?: false).append('\n')
         sb.append("CPU 核心数: ").append(Runtime.getRuntime().availableProcessors()).append('\n')
-        sb.append("线程 / 置换表: ").append(threads).append(" / ").append(hashMb).append("MB\n")
+        sb.append("实际生效: ").append(
+            when {
+                e == null || e.usedThreads == 0 -> "—"
+                else -> "${e.usedThreads} 线程 / ${e.usedHash}MB 置换表"
+            }
+        ).append('\n')
+        sb.append("界面首选: ").append(threads).append(" / ").append(hashMb).append("MB\n")
         sb.append("权重: ").append(
             if (e == null || e.nnueBytes <= 0) "—"
             else String.format(Locale.US, "%.1f MB", e.nnueBytes / 1048576.0)
@@ -241,11 +247,12 @@ class MainActivity : AppCompatActivity() {
                 engine = e
                 engineReady = e.ready
                 if (e.ready) {
-                    statusText.text = "${e.name}　·　${threads} 线程　·　${hashMb}MB 置换表"
+                    statusText.text = "${e.name}　·　${e.usedThreads} 线程　·　${e.usedHash}MB 置换表　·　" +
+                            (if (e.usedDotprod) "dotprod" else "通用版")
                     statusText.setTextColor(0xFF0B7A45.toInt())
                     maybeAiMove()
                 } else {
-                    statusText.text = "引擎不可用：${e.lastError ?: "未知错误"}"
+                    statusText.text = "引擎不可用，点「诊断」查看原因"
                     statusText.setTextColor(0xFFD92D20.toInt())
                 }
                 refresh()

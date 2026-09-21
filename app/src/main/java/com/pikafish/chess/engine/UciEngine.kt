@@ -51,6 +51,10 @@ class UciEngine(private val ctx: Context) {
         private set
     var usedDotprod = false
         private set
+    var usedThreads = 0
+        private set
+    var usedHash = 0
+        private set
     var nnueBytes = 0L
         private set
     var cpuHasDotprod = false
@@ -140,33 +144,65 @@ class UciEngine(private val ctx: Context) {
 
     fun start(threads: Int, hashMb: Int) {
         cpuHasDotprod = detectDotprod()
-        log("CPU 支持 asimddp(dotprod) = $cpuHasDotprod")
+        log("CPU 支持 asimddp(dotprod) = $cpuHasDotprod，核心数 ${Runtime.getRuntime().availableProcessors()}")
 
-        // 优先用 CPU 支持的那一版；失败自动换另一版
-        val order = if (cpuHasDotprod) listOf(true, false) else listOf(false, true)
-        for (dot in order) {
-            if (tryStart(dot, threads, hashMb)) {
+        // 逐级降档重试。引擎在预热搜索时被杀，最常见的原因是
+        // 内存/线程受限（安卓会把宿主 App 的子进程一起纳入内存回收）。
+        // 所以先用满配试，失败就降配再来，最后才报不可用。
+        val attempts = listOf(
+            Triple(cpuHasDotprod, threads, hashMb),   // 首选：按 CPU 能力 + 满配
+            Triple(!cpuHasDotprod, threads, hashMb),  // 换另一个引擎版本
+            Triple(cpuHasDotprod, 2, 32),             // 降配（2 线程 / 32MB）
+            Triple(!cpuHasDotprod, 2, 32),
+        )
+
+        for ((dot, th, hs) in attempts) {
+            if (tryStart(dot, th, hs)) {
                 usedDotprod = dot
+                usedThreads = th
+                usedHash = hs
                 ready = true
-                log("引擎启动成功：$name（${if (dot) "dotprod" else "generic"} 版，$threads 线程，${hashMb}MB 置换表）")
+                log("引擎启动成功：$name（${if (dot) "dotprod" else "generic"} 版，${th} 线程，${hs}MB 置换表）")
                 return
             }
-            if (proc != null) {
-                // 上一版失败留下的进程清掉
-                try {
-                    proc?.destroy()
-                } catch (_: Exception) {
-                }
-                proc = null
-            }
+            killProc()
         }
         ready = false
-        if (lastError == null) lastError = "两种引擎版本都无法启动"
+        if (lastError == null) lastError = "所有引擎配置都无法启动"
         log("引擎启动失败：$lastError")
     }
 
+    private fun killProc() {
+        try {
+            proc?.destroy()
+        } catch (_: Exception) {
+        }
+        proc = null
+        writer = null
+        queue = null
+    }
+
+    /** 把进程退出状态翻译成人能看懂的原因 —— 这是定位崩溃的关键线索 */
+    private fun deathInfo(p: Process): String {
+        val code = try {
+            p.exitValue()
+        } catch (e: Exception) {
+            return "（进程状态未知：${e.message}）"
+        }
+        val why = when (code) {
+            137 -> "SIGKILL(9) —— 最可能是被系统内存回收杀掉（内存不足）；也可能是被强制终止"
+            134 -> "SIGABRT(6) —— 引擎自身 abort（断言失败，或权重文件损坏）"
+            132 -> "SIGILL(4) —— 执行了当前 CPU 不支持的指令"
+            139 -> "SIGSEGV(11) —— 段错误"
+            135 -> "SIGBUS(7) —— 总线错误"
+            143 -> "SIGTERM(15) —— 被请求终止"
+            else -> if (code > 128) "信号 ${code - 128}" else "退出码 $code"
+        }
+        return "进程退出状态：$why"
+    }
+
     private fun tryStart(dotprod: Boolean, threads: Int, hashMb: Int): Boolean {
-        val tag = if (dotprod) "dotprod" else "generic"
+        val tag = "${if (dotprod) "dotprod" else "generic"}/$threads 线程/$hashMb MB"
         try {
             val exe = binFile(dotprod)
             if (!exe.exists()) {
@@ -192,23 +228,25 @@ class UciEngine(private val ctx: Context) {
                         val line = r.readLine() ?: break
                         synchronized(tail) {
                             tail.add(line)
-                            if (tail.size > 40) tail.removeAt(0)
+                            if (tail.size > 60) tail.removeAt(0)
                         }
                         q.put(line)
                     }
                 } catch (_: Exception) {
                 }
             }.apply { isDaemon = true }.start()
-            // 让引擎崩溃时的输出能进日志
             this.tailBuf = tail
+
+            fun died(stage: String): Boolean {
+                if (p.isAlive) return false
+                lastError = "[$tag] $stage 时引擎退出。\n" + deathInfo(p) + "\n\n引擎最后的输出：\n" + tailText()
+                log(lastError!!)
+                return true
+            }
 
             send("uci")
             val ids = readUntil({ it.startsWith("uciok") }, 30_000)
-            if (!p.isAlive) {
-                lastError = "[$tag] 引擎握手前就退出了（多半是 CPU 指令集不兼容）：\n" + tailText()
-                log(lastError!!)
-                return false
-            }
+            if (died("UCI 握手")) return false
             ids.firstOrNull { it.startsWith("id name") }?.let { name = it.substring(7).trim() }
 
             send("setoption name EvalFile value ${nnue.absolutePath}")
@@ -217,22 +255,15 @@ class UciEngine(private val ctx: Context) {
             send("setoption name MultiPV value 1")
             send("isready")
             readUntil({ it == "readyok" }, 90_000)
-            if (!p.isAlive) {
-                lastError = "[$tag] 加载权重时引擎退出（权重可能损坏，或内存/指令集问题）：\n" + tailText()
-                log(lastError!!)
-                return false
-            }
+            if (died("加载权重")) return false
 
             // 预热：第一次真正搜索要建线程池 / 分配置换表，会多花好几秒。
             // 提前吃掉，否则用户看到的第一步会莫名卡住。
             send("position fen rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w")
             send("go movetime 600")
             readUntil({ it.startsWith("bestmove") }, 120_000)
-            if (!p.isAlive) {
-                lastError = "[$tag] 预热搜索时引擎退出：\n" + tailText()
-                log(lastError!!)
-                return false
-            }
+            if (died("预热搜索")) return false
+
             lastError = null
             return true
         } catch (e: Throwable) {
@@ -246,8 +277,9 @@ class UciEngine(private val ctx: Context) {
 
     private fun tailText(): String = synchronized(tailBuf ?: ArrayList<String>()) {
         val l = tailBuf
-        if (l == null || l.isEmpty()) "（引擎没有输出任何错误信息）"
-        else l.joinToString("\n").take(1500)
+        if (l == null || l.isEmpty()) "（引擎没有任何输出）"
+        // 取【末尾】，错误信息都在最后 —— 之前写成 take 把关键部分裁掉了
+        else l.joinToString("\n").takeLast(2000)
     }
 
     private fun send(cmd: String) {
