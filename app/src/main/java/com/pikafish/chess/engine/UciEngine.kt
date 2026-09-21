@@ -210,7 +210,7 @@ class UciEngine(private val ctx: Context) {
                 lastError = "APK 里缺少 $tag 版引擎"
                 return false
             }
-            val nnue = ensureNnue()
+            ensureNnue()
 
             val pb = ProcessBuilder(exe.absolutePath)
             pb.directory(ctx.filesDir)
@@ -249,7 +249,11 @@ class UciEngine(private val ctx: Context) {
             if (died("UCI 握手")) return false
             ids.firstOrNull { it.startsWith("id name") }?.let { name = it.substring(7).trim() }
 
-            send("setoption name EvalFile value ${nnue.absolutePath}")
+            // ⚠️ EvalFile 必须用【相对文件名】，不能用绝对路径！
+            // 实测：绝对路径会让引擎报 "network file ... was not loaded successfully"
+            // 然后 exit(1)；换成相对文件名（配合 pb.directory(filesDir)）就正常。
+            // 而且报错发生在 readyok 之后、第一次 go 时才出现，很容易误判成"搜索崩溃"。
+            send("setoption name EvalFile value $NNUE_FILE")
             send("setoption name Threads value $threads")
             send("setoption name Hash value $hashMb")
             send("setoption name MultiPV value 1")

@@ -54,22 +54,27 @@ jobs:
           done
           echo "引擎校验通过"
 
-      # 权重 50MB 不进 git；云机器访问 GitHub 是本地速度，几秒钟就能拉完
-      - name: 下载 NNUE 权重
+      # 权重必须与引擎【同版本】。Pikafish 的神经网络和引擎是强绑定的，
+      # 版本不匹配时引擎会在第一次 go 时报 "network file ... was not loaded" 并 exit(1)，
+      # 表现就是「uciok/readyok 都正常，一搜索就挂」。
+      # 所以优先用仓库自带的那份（与 prebuilt/ 里的引擎来自同一个整合包）。
+      - name: 准备权重
         run: |
           set -e
-          URL="https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-09-06/Pikafish.2026-09-06.7z"
-          echo "下载 $URL"
-          curl -fL --retry 3 -o pf.7z "$URL"
-          ls -lh pf.7z
-          sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full
-          7z x -y pf.7z -opf > /dev/null
-          echo "--- 包内文件 ---"
-          find pf -type f | head -30
-          NNUE=$(find pf -type f -name '*.nnue' | head -1)
-          test -n "$NNUE" || { echo "!! 权重文件缺失"; exit 1; }
-          echo "选用权重: $NNUE"
-          cp "$NNUE" app/src/main/assets/pikafish.nnue
+          mkdir -p app/src/main/assets
+          if [ -f prebuilt/pikafish.nnue ]; then
+            echo "使用仓库自带权重（与引擎同版本）"
+            cp prebuilt/pikafish.nnue app/src/main/assets/pikafish.nnue
+          else
+            echo "仓库没有自带权重，回退到从官方 release 下载"
+            URL="https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-09-06/Pikafish.2026-09-06.7z"
+            curl -fL --retry 3 -o pf.7z "$URL"
+            sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full
+            7z x -y pf.7z -opf > /dev/null
+            NNUE=$(find pf -type f -name '*.nnue' | head -1)
+            test -n "$NNUE" || { echo "!! 权重文件缺失"; exit 1; }
+            cp "$NNUE" app/src/main/assets/pikafish.nnue
+          fi
 
           NSZ=$(stat -c %s app/src/main/assets/pikafish.nnue)
           echo "权重: $NSZ 字节"
