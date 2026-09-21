@@ -8,6 +8,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 发布 Release 需要写权限
+    permissions:
+      contents: write
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
@@ -107,3 +110,50 @@ jobs:
           name: pikafish-xiangqi-apk
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 90
+
+      # 顺手发一个 Release：Release 附件可以在手机浏览器上直接点开下载，
+      # 而 Actions 的 Artifact 必须登录、手机端还要解压 zip，很麻烦
+      - name: 复制一份带版本号的 APK
+        run: |
+          set -e
+          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/xiangqi-master.apk
+          ls -lh app/build/outputs/apk/debug/
+
+      - name: 发布 Release
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: 象棋大师 v1.0.${{ github.run_number }}（一期）
+          body: |
+            ## 象棋大师 · Pikafish 安卓版（一期）
+
+            原生安卓中国象棋 App，走子由 **Pikafish 2026-01-31**（象棋版 Stockfish，arm64）计算。
+
+            **直接下载下面的 `xiangqi-master.apk`，在手机上安装即可。**
+
+            安装时系统会提示"未知来源应用"，需要允许。
+
+            ### 一期功能
+            - 选择执红 / 执黑
+            - 原生棋盘（Canvas 绘制，无图片资源）
+            - 触屏走子：点棋子 → 绿点是合法落点 → 点落点走子
+            - AI 自动应对，思考时间可选 1.5 / 3 / 6 / 10 秒
+            - 棋盘高亮：AI 最近一步（橙圈+箭头）、AI 历史落点（橙点）、被将军（红圈）
+            - 双方着法列表（中文记谱）
+            - 悔棋 / 认输 / 重开一局，**终局后仍可「悔棋再战」**
+
+            ### 首次启动注意
+            - 第一次启动要解压 50MB 权重，等十几秒，状态栏会出现"引擎启动中…"
+            - 之后的**第一步**还会多花 2~3 秒（引擎预热线程池与置换表）
+            - 状态栏变绿显示 `Pikafish · 6 线程 · 256MB 置换表` 即代表引擎正常
+
+            ### 环境
+            - 仅支持 arm64（2018 年以后的安卓机基本都支持）
+            - 最低 Android 8.0
+
+            引擎来自 [official-pikafish/Pikafish](https://github.com/official-pikafish/Pikafish)（GPL-3.0）。
+          files: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/debug/xiangqi-master.apk
+          fail_on_unmatched_files: true

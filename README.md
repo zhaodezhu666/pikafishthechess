@@ -78,13 +78,42 @@ python tools/prepare_engine.py "D:/临时/皮卡鱼 20260131.zip"
 
 `pikafish.nnue` 有 49MB，提交进仓库会让推送变得极慢。改为**编译时由 CI 下载官方 release 并注入 APK**——云端机器访问 GitHub 是本地速度。
 
+## 下载安装（手机）
+
+**直接点这个链接下载 APK**（不用登录、不用解压）：
+
+```
+https://github.com/zhaodezhu666/pikafishthechess/releases/latest/download/xiangqi-master.apk
+```
+
+或打开 Releases 页面手动挑版本：
+
+```
+https://github.com/zhaodezhu666/pikafishthechess/releases
+```
+
+下载后安装时，系统会提示"未知来源应用"，允许即可。
+
+> 为什么走 Release 而不是 Actions Artifact：Artifact 必须登录 GitHub，
+> 而且手机上下到的是 zip 还得再解压；Release 附件是直链，点开就能装。
+
 ## 构建
 
 推送到 `main` 分支即自动触发，也可在 Actions 页手动 `Run workflow`。
 
-产物在对应 run 的 **Artifacts → pikafish-xiangqi-apk**，下载解压得到 `app-debug.apk`。
+每次构建会：
 
-安装时需要在手机上允许"安装未知来源应用"。
+1. 校验仓库内的引擎二进制（体积 + ELF magic）
+2. 从官方 release 下载 NNUE 权重
+3. 跑 18 条规则单元测试
+4. 编译 Debug APK
+5. 校验 APK 内确实含引擎与权重
+6. 上传 Artifact **并发布一个 Release**（手机直链下载用）
+
+产物两个地方都有：
+
+- Release 附件：`xiangqi-master.apk` / `app-debug.apk`（推荐）
+- Actions → 对应 run → Artifacts → `pikafish-xiangqi-apk`（需登录，得到的是 zip）
 
 ## 引擎参数
 
