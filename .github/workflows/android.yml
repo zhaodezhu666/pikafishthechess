@@ -23,8 +23,33 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      # 引擎与权重不进 git（50MB），由云端在编译时下载注入，云机器访问 GitHub 是本地速度
-      - name: 下载 Pikafish 引擎与权重
+      # 引擎二进制随仓库分发（1.7MB，静态链接的 arm64 ELF）。
+      # 注意：官方 release 的 7z 里【只有权重，没有二进制】，所以这里只能用仓库自带的。
+      - name: 准备引擎二进制
+        run: |
+          set -e
+          mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/assets
+          SRC=prebuilt/libpikafish-arm64-dotprod.so
+          test -f "$SRC" || { echo "!! 仓库里缺少 prebuilt/$SRC"; exit 1; }
+          cp "$SRC" app/src/main/jniLibs/arm64-v8a/libpikafish.so
+          chmod +x app/src/main/jniLibs/arm64-v8a/libpikafish.so
+
+          TARGET=app/src/main/jniLibs/arm64-v8a/libpikafish.so
+          SZ=$(stat -c %s "$TARGET")
+          MAGIC=$(head -c 4 "$TARGET" | od -An -tx1 | tr -d ' \n')
+          echo "引擎: $SZ 字节, magic=$MAGIC"
+          # 防呆：体积必须像引擎（0.5~6MB），且必须是 ELF。
+          # 上一版就是把 49MB 的权重复制进来当引擎用，这里拦住。
+          if [ "$SZ" -lt 500000 ] || [ "$SZ" -gt 6000000 ]; then
+            echo "!! 引擎体积异常（预期 0.5~6MB），拷错文件了"; exit 1
+          fi
+          if [ "$MAGIC" != "7f454c46" ]; then
+            echo "!! 不是 ELF 文件，拷错文件了"; exit 1
+          fi
+          echo "引擎校验通过"
+
+      # 权重 50MB 不进 git；云机器访问 GitHub 是本地速度，几秒钟就能拉完
+      - name: 下载 NNUE 权重
         run: |
           set -e
           URL="https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-09-06/Pikafish.2026-09-06.7z"
@@ -33,35 +58,18 @@ jobs:
           ls -lh pf.7z
           sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full
           7z x -y pf.7z -opf > /dev/null
-          echo "--- 包内结构 ---"
-          find pf -maxdepth 2 -type d | head -20
-          echo "--- 候选可执行文件 ---"
-          find pf -type f \( -name 'pikafish*' -o -name '*armv8*' \) | head -30
-
-          mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/assets
-
-          # 优先 dotprod（ARMv8.2+ 手机快 20~30%），没有就退到普通 armv8
-          EXE=$(find pf -type f -name 'pikafish-armv8-dotprod' | head -1)
-          if [ -z "$EXE" ]; then
-            EXE=$(find pf -type f -name '*armv8*dotprod*' | head -1)
-          fi
-          if [ -z "$EXE" ]; then
-            EXE=$(find pf -type f -name 'pikafish-armv8' | head -1)
-          fi
-          if [ -z "$EXE" ]; then
-            echo "!! 找不到 arm64 引擎二进制，改用包内任意 pikafish*"
-            EXE=$(find pf -type f -name 'pikafish*' | head -1)
-          fi
-          test -n "$EXE" || { echo "!! 引擎二进制缺失"; exit 1; }
-          echo "选用引擎: $EXE"
-          cp "$EXE" app/src/main/jniLibs/arm64-v8a/libpikafish.so
-          chmod +x app/src/main/jniLibs/arm64-v8a/libpikafish.so
-
+          echo "--- 包内文件 ---"
+          find pf -type f | head -30
           NNUE=$(find pf -type f -name '*.nnue' | head -1)
           test -n "$NNUE" || { echo "!! 权重文件缺失"; exit 1; }
           echo "选用权重: $NNUE"
           cp "$NNUE" app/src/main/assets/pikafish.nnue
 
+          NSZ=$(stat -c %s app/src/main/assets/pikafish.nnue)
+          echo "权重: $NSZ 字节"
+          if [ "$NSZ" -lt 10000000 ]; then
+            echo "!! 权重体积异常"; exit 1
+          fi
           ls -lh app/src/main/jniLibs/arm64-v8a/ app/src/main/assets/
 
       - name: 跑单元测试（规则层）
@@ -77,6 +85,21 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           ls -l app/build/outputs/apk/debug/ >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "## APK 内部结构校验" >> $GITHUB_STEP_SUMMARY
+          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          unzip -l "$APK" | grep -E "libpikafish|pikafish.nnue" >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          unzip -l "$APK" | grep -E "libpikafish|pikafish.nnue" >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: 校验 APK 里确实带了引擎和权重
+        run: |
+          set -e
+          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          echo "APK: $APK"
+          unzip -l "$APK" | grep -E "lib/arm64-v8a/libpikafish.so|assets/pikafish.nnue" || {
+            echo "!! APK 里缺少引擎或权重"; unzip -l "$APK" | head -40; exit 1; }
+          echo "APK 内容校验通过"
 
       - name: 上传 APK
         uses: actions/upload-artifact@v4

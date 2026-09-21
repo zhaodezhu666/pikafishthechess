@@ -10,6 +10,7 @@
 .cxx
 local.properties
 
-# 引擎二进制与权重由 CI 在编译时下载注入，不进仓库（权重 50MB）
-app/src/main/jniLibs/arm64-v8a/libpikafish.so
+# 权重 50MB，由 CI 在编译时从官方 release 下载注入（本地下载极慢），不进仓库
+# 说明：官方 release 的 7z 里【只有权重、没有二进制】，所以引擎二进制必须随仓库分发，
+#       放在 prebuilt/ 下（1.7MB），不能加进本忽略清单。
 app/src/main/assets/pikafish.nnue
