@@ -48,9 +48,35 @@ app/src/test/.../BoardTest.kt   18 条规则单元测试（CI 上必须全过才
 
 漏掉任何一条，`.so` 会被压缩在 APK 里，无法执行。
 
-**2. 引擎与权重不进 git**
+**2. 引擎二进制必须随仓库分发（踩过的坑）**
 
-`pikafish.nnue` 有 50.7 MB，提交进仓库会让推送变得极慢。改为**编译时由 CI 下载官方 release 并注入 APK**——云端机器访问 GitHub 是本地速度。
+Pikafish 官方 release（`Pikafish.2026-09-06.7z`，52MB）解压后**只有一个 `pikafish.nnue`，
+没有任何引擎二进制**。第一版流水线写了「找不到 arm64 就从包里随便挑一个 pikafish*」的兜底，
+结果把 49MB 的权重拷成了 `libpikafish.so`，打出来的 APK 是废的（构建还显示成功）。
+
+现在改为：
+
+| 文件 | 来源 | 进 git？ |
+|---|---|---|
+| 引擎二进制 | `prebuilt/libpikafish-arm64-dotprod.so`（1.73MB，静态链接 aarch64） | ✅ 随仓库 |
+| `pikafish.nnue` 权重（49MB） | CI 编译时从官方 release 下载 | ❌ 不进仓库 |
+
+并加了三道防呆校验：引擎体积必须在 0.5~6MB、必须是 ELF（magic `7f454c46`）、
+APK 打包后必须能在 `unzip -l` 里看到引擎与权重。任一条不过直接构建失败。
+
+引擎二进制由 `tools/prepare_engine.py` 从社区整合包里提取，脚本会校验 ELF 架构与可否执行：
+
+```bash
+python tools/prepare_engine.py "D:/临时/皮卡鱼 20260131.zip"
+```
+
+> 关于 PIE：安卓 5.0+ 要求 PIE，但这条只针对**动态链接**的可执行文件。
+> Pikafish 安卓版是**静态链接的 ET_EXEC**（无 `PT_INTERP`），由内核直接加载，
+> 所以能正常执行。判断依据是「有无 `PT_INTERP`」，不是「`e_type` 是否为 3」。
+
+**3. 权重不进 git**
+
+`pikafish.nnue` 有 49MB，提交进仓库会让推送变得极慢。改为**编译时由 CI 下载官方 release 并注入 APK**——云端机器访问 GitHub 是本地速度。
 
 ## 构建
 
