@@ -1,4 +1,4 @@
-# 象棋大师 · Pikafish Android 版
+# 尖头鳗指导棋 · Pikafish Android 版
 
 原生安卓中国象棋 App，走子由 **Pikafish**（象棋版 Stockfish）计算，等级分 3000+。
 

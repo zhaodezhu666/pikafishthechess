@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">象棋大师</string>
+    <string name="app_name">尖头鳗指导棋</string>
     <string name="engine_ready">引擎就绪</string>
     <string name="engine_starting">引擎启动中…</string>
     <string name="engine_missing">引擎不可用</string>

@@ -19,6 +19,8 @@ import com.pikafish.chess.core.Chess
 import com.pikafish.chess.core.Game
 import com.pikafish.chess.engine.UciEngine
 import com.pikafish.chess.ui.BoardView
+import java.io.File
+import java.util.Locale
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
@@ -41,17 +43,36 @@ class MainActivity : AppCompatActivity() {
     private val thinkLabels = arrayOf("快 · 1.5 秒", "标准 · 3 秒", "强 · 6 秒", "最强 · 10 秒")
     @Volatile private var thinkMs = 6000
 
-    private val threads = 6
-    private val hashMb = 256
+    // 线程数按 CPU 核心数自适应，最多 6 —— 手机大小核架构，开满反而更慢
+    private val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
+    // 置换表从 256MB 降到 128MB：启动时清零更快，内存压力更小
+    private val hashMb = 128
 
     /** AI 走过的落点，用于棋盘上的橙色标记 */
     private val aiMarks = ArrayList<Int>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installCrashHandler()
         buildUi()
         bootEngine()
         ui.postDelayed({ askSide() }, 400)
+    }
+
+    /** 记录未捕获异常，便于用户在「诊断」里把堆栈发回来定位问题 */
+    private fun installCrashHandler() {
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try {
+                val sw = java.io.StringWriter()
+                e.printStackTrace(java.io.PrintWriter(sw))
+                File(filesDir, "last_crash.txt").writeText(
+                    "时间: " + java.util.Date() + "\n线程: " + t.name + "\n\n" + sw
+                )
+            } catch (_: Throwable) {
+            }
+            prev?.uncaughtException(t, e)
+        }
     }
 
     // ------------------------------------------------------------------ UI
@@ -65,7 +86,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         statusText = TextView(this).apply {
-            text = "引擎启动中…（首次启动要解压 50MB 权重，稍等）"
+            text = "引擎加载中… 可以先选边、先走棋，AI 就绪后会自动应招"
             textSize = 14f
             setTextColor(0xFF1C1F23.toInt())
             setPadding(dp(16), dp(12), dp(16), dp(6))
@@ -139,10 +160,62 @@ class MainActivity : AppCompatActivity() {
         }
         row2.addView(mkButton("悔棋") { doUndo() })
         row2.addView(mkButton("认输") { doResign() })
-        row2.addView(mkButton("重开一局") { askSide() })
+        row2.addView(mkButton("重开") { askSide() })
+        row2.addView(mkButton("诊断") { showDiagnostics() })
         root.addView(row2)
 
         setContentView(root)
+    }
+
+    /** 诊断面板：引擎选了哪版、CPU 特性、权重是否完整、引擎日志、上次崩溃堆栈 */
+    private fun showDiagnostics() {
+        val e = engine
+        val sb = StringBuilder()
+        sb.append("引擎: ").append(e?.name ?: "未启动").append('\n')
+        sb.append("使用版本: ").append(
+            when {
+                e == null -> "—"
+                e.usedDotprod -> "dotprod（ARMv8.2 加速）"
+                else -> "generic（兼容版）"
+            }
+        ).append('\n')
+        sb.append("CPU 支持 dotprod: ").append(e?.cpuHasDotprod ?: false).append('\n')
+        sb.append("CPU 核心数: ").append(Runtime.getRuntime().availableProcessors()).append('\n')
+        sb.append("线程 / 置换表: ").append(threads).append(" / ").append(hashMb).append("MB\n")
+        sb.append("权重: ").append(
+            if (e == null || e.nnueBytes <= 0) "—"
+            else String.format(Locale.US, "%.1f MB", e.nnueBytes / 1048576.0)
+        ).append('\n')
+        sb.append("状态: ").append(if (e?.ready == true) "运行中" else "未就绪").append('\n')
+        val err = e?.lastError
+        if (!err.isNullOrBlank()) sb.append("\n!! 最近错误：\n").append(err).append('\n')
+
+        val cf = File(filesDir, "last_crash.txt")
+        if (cf.exists()) {
+            sb.append("\n=== 上次崩溃 ===\n").append(cf.readText().take(2500)).append('\n')
+        }
+        sb.append("\n=== 引擎日志 ===\n").append(e?.diagnostics()?.takeLast(2500) ?: "（无）")
+
+        val text = sb.toString()
+        AlertDialog.Builder(this)
+            .setTitle("诊断信息")
+            .setMessage(text)
+            .setPositiveButton("复制") { _, _ ->
+                try {
+                    val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("diag", text))
+                    statusText.text = "诊断信息已复制到剪贴板"
+                } catch (_: Exception) {
+                }
+            }
+            .setNeutralButton("清除崩溃记录") { _, _ ->
+                try {
+                    cf.delete()
+                } catch (_: Exception) {
+                }
+            }
+            .setNegativeButton("关闭", null)
+            .show()
     }
 
     private fun mkButton(label: String, onClick: () -> Unit): Button =
@@ -213,7 +286,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun onTap(sq: Int) {
         val g = game ?: return
-        if (thinking || !engineReady || g.over || !g.isMyTurn()) return
+        // 注意：这里【不】要求 engineReady —— 引擎还在加载时也允许走子，
+        // 等引擎就绪后 bootEngine 会补一次 maybeAiMove()，不会漏应招
+        if (thinking || g.over || !g.isMyTurn()) return
 
         val sel = boardView.selected
         if (sel >= 0 && boardView.legalTargets.contains(sq)) {
@@ -311,7 +386,7 @@ class MainActivity : AppCompatActivity() {
             if (!g.over && g.board.inCheck(g.turn)) g.board.kingSquare(g.turn) else -1
 
         statusText.text = when {
-            !engineReady -> "引擎启动中…（首次启动要解压 50MB 权重，稍等）"
+            !engineReady -> "引擎加载中… 可以先走棋，AI 就绪后会自动应招"
             g.over -> "对局结束"
             thinking -> "AI 正在推演（最多 $thinkMs 毫秒）…"
             g.isMyTurn() -> if (g.board.inCheck(g.mySide)) "你被将军，必须应将" else "轮到你走"

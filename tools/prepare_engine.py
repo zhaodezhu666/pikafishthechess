@@ -9,10 +9,14 @@ Pikafish 官方 release（如 Pikafish.2026-09-06.7z）里【只有 pikafish.nnu
 没有任何引擎二进制】。安卓版的引擎二进制只能从社区整合包（如「皮卡鱼 XXXXXXXX.zip」）
 或自行编译获得。
 
-本脚本做三件事：
-  1. 从整合包里挑出 arm64 引擎（优先 dotprod，ARMv8.2+ 手机上快 20~30%）
-  2. 校验它确实是 arm64 ELF、且在安卓上能执行
-  3. 落盘到 prebuilt/libpikafish-arm64-dotprod.so
+为什么要提取【两个】版本
+------------------------
+- `pikafish-armv8-dotprod`：需要 ARMv8.2-A 的 dot product 指令（asimddp），
+  在支持的手机上快 20~30%；但**在不支持的旧 CPU 上会触发 SIGILL 直接崩溃**。
+- `pikafish-armv8`：基线版本，兼容性最好。
+
+App 会在运行时读 /proc/cpuinfo 判断有没有 asimddp，选对应的那个；
+万一首选版本启动就挂，还会自动换另一个重试。所以两个都要打包。
 
 用法
 ----
@@ -38,12 +42,26 @@ KEEP_DIR = os.path.join(PROJ, 'prebuilt')
 PT_INTERP = 3
 EM_AARCH64 = 0xB7
 
+# 输出名 -> 整合包内文件名关键词
+VARIANTS = [
+    ('libpikafish.so', 'pikafish-armv8-dotprod'),
+    ('libpikafish-generic.so', 'pikafish-armv8'),
+]
+
 
 def pick(names, kw):
     for n in names:
         if n.startswith('__MACOSX') or n.endswith('/'):
             continue
-        if kw in os.path.basename(n):
+        b = os.path.basename(n)
+        # 精确匹配优先，避免 'pikafish-armv8' 命中 'pikafish-armv8-dotprod'
+        if b == kw:
+            return n
+    for n in names:
+        if n.startswith('__MACOSX') or n.endswith('/'):
+            continue
+        b = os.path.basename(n)
+        if kw in b and not b.endswith(('.exe', '.nnue', '.txt', '.md')):
             return n
     return None
 
@@ -86,45 +104,37 @@ def main():
 
     z = zipfile.ZipFile(zip_path)
     names = [i.filename for i in z.infolist()]
-
-    src = pick(names, 'pikafish-armv8-dotprod') or pick(names, 'pikafish-armv8')
-    if not src:
-        # 兜底：任何看着像 arm64 安卓引擎的文件
-        for n in names:
-            b = os.path.basename(n)
-            if b.endswith(('.exe', '.nnue', '.txt', '.md')):
-                continue
-            if 'arm64' in b or 'aarch64' in b or 'armv8' in b:
-                src = n
-                break
-    if not src:
-        print('!! 整合包里没找到 Android 版引擎。包内文件：')
-        for n in names:
-            print('   ', n)
-        return 1
-
-    data = z.read(src)
-    print('选用: %s  (%.2f MB)' % (src, len(data) / 1048576))
-
-    ok, msg = check_elf(data)
-    print('校验: ' + msg)
-    if not ok:
-        return 2
-
     os.makedirs(KEEP_DIR, exist_ok=True)
     os.makedirs(DST_DIR, exist_ok=True)
-    keep = os.path.join(KEEP_DIR, 'libpikafish-arm64-dotprod.so')
-    dst = os.path.join(DST_DIR, 'libpikafish.so')
-    with open(keep, 'wb') as f:
-        f.write(data)
-    with open(dst, 'wb') as f:
-        f.write(data)
-    os.chmod(dst, 0o755)
 
-    print('\n已写入：')
-    print('   prebuilt/libpikafish-arm64-dotprod.so        （留档，随仓库分发）')
-    print('   app/src/main/jniLibs/arm64-v8a/libpikafish.so （打包用）')
-    print('\n接下来：git add -A && git commit && git push，CI 会自动重新出包。')
+    done = 0
+    for out_name, kw in VARIANTS:
+        src = pick(names, kw)
+        if not src:
+            print('[跳过] 整合包里没有 %s' % kw)
+            continue
+        data = z.read(src)
+        ok, msg = check_elf(data)
+        flag = '✓' if ok else '✗'
+        print('[%s] %-26s -> %-24s %6.2f MB  %s' % (flag, kw, out_name, len(data) / 1048576, msg))
+        if not ok:
+            continue
+        keep = os.path.join(KEEP_DIR, out_name)
+        dst = os.path.join(DST_DIR, out_name)
+        for p in (keep, dst):
+            with open(p, 'wb') as f:
+                f.write(data)
+        os.chmod(dst, 0o755)
+        done += 1
+
+    if done == 0:
+        print('\n!! 没有提取到任何可用引擎。包内文件：')
+        for n in names:
+            print('   ', n)
+        return 2
+
+    print('\n已提取 %d 个引擎到 prebuilt/ 与 app/src/main/jniLibs/arm64-v8a/' % done)
+    print('接下来：git add -A && git commit && git push，CI 会自动重新出包。')
     return 0
 
 

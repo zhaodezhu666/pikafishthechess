@@ -26,29 +26,32 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      # 引擎二进制随仓库分发（1.7MB，静态链接的 arm64 ELF）。
+      # 引擎二进制随仓库分发（两份各 1.7MB，静态链接的 arm64 ELF）。
       # 注意：官方 release 的 7z 里【只有权重，没有二进制】，所以这里只能用仓库自带的。
+      # 打两份是为了运行时按 CPU 指令集选：dotprod 快 20~30%，但不支持时会崩，需要 generic 兜底。
       - name: 准备引擎二进制
         run: |
           set -e
           mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/assets
-          SRC=prebuilt/libpikafish-arm64-dotprod.so
-          test -f "$SRC" || { echo "!! 仓库里缺少 prebuilt/$SRC"; exit 1; }
-          cp "$SRC" app/src/main/jniLibs/arm64-v8a/libpikafish.so
-          chmod +x app/src/main/jniLibs/arm64-v8a/libpikafish.so
+          for F in libpikafish.so libpikafish-generic.so; do
+            SRC="prebuilt/$F"
+            test -f "$SRC" || { echo "!! 仓库里缺少 prebuilt/$F"; exit 1; }
+            cp "$SRC" "app/src/main/jniLibs/arm64-v8a/$F"
+            chmod +x "app/src/main/jniLibs/arm64-v8a/$F"
 
-          TARGET=app/src/main/jniLibs/arm64-v8a/libpikafish.so
-          SZ=$(stat -c %s "$TARGET")
-          MAGIC=$(head -c 4 "$TARGET" | od -An -tx1 | tr -d ' \n')
-          echo "引擎: $SZ 字节, magic=$MAGIC"
-          # 防呆：体积必须像引擎（0.5~6MB），且必须是 ELF。
-          # 上一版就是把 49MB 的权重复制进来当引擎用，这里拦住。
-          if [ "$SZ" -lt 500000 ] || [ "$SZ" -gt 6000000 ]; then
-            echo "!! 引擎体积异常（预期 0.5~6MB），拷错文件了"; exit 1
-          fi
-          if [ "$MAGIC" != "7f454c46" ]; then
-            echo "!! 不是 ELF 文件，拷错文件了"; exit 1
-          fi
+            TARGET="app/src/main/jniLibs/arm64-v8a/$F"
+            SZ=$(stat -c %s "$TARGET")
+            MAGIC=$(head -c 4 "$TARGET" | od -An -tx1 | tr -d ' \n')
+            echo "$F: $SZ 字节, magic=$MAGIC"
+            # 防呆：体积必须像引擎（0.5~6MB），且必须是 ELF。
+            # 之前踩过「把 49MB 的权重复制进来当引擎用」的坑，这里拦住。
+            if [ "$SZ" -lt 500000 ] || [ "$SZ" -gt 6000000 ]; then
+              echo "!! $F 体积异常（预期 0.5~6MB），拷错文件了"; exit 1
+            fi
+            if [ "$MAGIC" != "7f454c46" ]; then
+              echo "!! $F 不是 ELF 文件，拷错文件了"; exit 1
+            fi
+          done
           echo "引擎校验通过"
 
       # 权重 50MB 不进 git；云机器访问 GitHub 是本地速度，几秒钟就能拉完
@@ -100,9 +103,12 @@ jobs:
           set -e
           APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
           echo "APK: $APK"
-          unzip -l "$APK" | grep -E "lib/arm64-v8a/libpikafish.so|assets/pikafish.nnue" || {
+          unzip -l "$APK" | grep -E "lib/arm64-v8a/libpikafish|assets/pikafish.nnue" || {
             echo "!! APK 里缺少引擎或权重"; unzip -l "$APK" | head -40; exit 1; }
-          echo "APK 内容校验通过"
+          for F in lib/arm64-v8a/libpikafish.so lib/arm64-v8a/libpikafish-generic.so assets/pikafish.nnue; do
+            unzip -l "$APK" | grep -q "$F" || { echo "!! APK 里缺少 $F"; exit 1; }
+          done
+          echo "APK 内容校验通过（两个引擎版本 + 权重都在）"
 
       - name: 上传 APK
         uses: actions/upload-artifact@v4
@@ -124,33 +130,40 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
-          name: 象棋大师 v1.0.${{ github.run_number }}（一期）
+          name: 尖头鳗指导棋 v1.0.${{ github.run_number }}
           body: |
-            ## 象棋大师 · Pikafish 安卓版（一期）
+            ## 尖头鳗指导棋
 
             原生安卓中国象棋 App，走子由 **Pikafish 2026-01-31**（象棋版 Stockfish，arm64）计算。
 
             **直接下载下面的 `xiangqi-master.apk`，在手机上安装即可。**
-
             安装时系统会提示"未知来源应用"，需要允许。
 
-            ### 一期功能
+            ### 本次更新
+            - 修复「第一步闪退」：权重改为「先写临时文件 → 校验完整 → 原子改名」，
+              杜绝上次残留的半个权重文件导致引擎加载失败
+            - 新增 generic 引擎兜底：运行时读 `/proc/cpuinfo` 判断 CPU 是否支持
+              dotprod 指令，不支持或启动失败会自动换兼容版，避免非法指令崩溃
+            - 启动更快：置换表 256MB → 128MB，线程数按 CPU 核心数自适应（上限 6）
+            - 引擎加载期间**也能先走棋**，不再是死等
+            - 新增「诊断」按钮：可一键查看引擎版本、CPU 特性、权重完整性、
+              引擎日志与崩溃堆栈
+
+            ### 功能
             - 选择执红 / 执黑
-            - 原生棋盘（Canvas 绘制，无图片资源）
-            - 触屏走子：点棋子 → 绿点是合法落点 → 点落点走子
-            - AI 自动应对，思考时间可选 1.5 / 3 / 6 / 10 秒
-            - 棋盘高亮：AI 最近一步（橙圈+箭头）、AI 历史落点（橙点）、被将军（红圈）
+            - 原生棋盘（Canvas 绘制），触屏走子，绿点为合法落点
+            - AI 自动应对，思考时间 1.5 / 3 / 6 / 10 秒可调
+            - AI 最近一步橙圈+方向箭头、历史落点橙点、被将军红圈
             - 双方着法列表（中文记谱）
-            - 悔棋 / 认输 / 重开一局，**终局后仍可「悔棋再战」**
+            - 悔棋 / 认输 / 重开，终局后仍可「悔棋再战」
 
             ### 首次启动注意
-            - 第一次启动要解压 50MB 权重，等十几秒，状态栏会出现"引擎启动中…"
-            - 之后的**第一步**还会多花 2~3 秒（引擎预热线程池与置换表）
-            - 状态栏变绿显示 `Pikafish · 6 线程 · 256MB 置换表` 即代表引擎正常
+            - 第一次启动要解压 50MB 权重，等十几秒
+            - 之后的**第一步**还会多花 2~3 秒（引擎预热）
+            - 状态栏变绿并显示引擎版本，即代表就绪
 
             ### 环境
-            - 仅支持 arm64（2018 年以后的安卓机基本都支持）
-            - 最低 Android 8.0
+            - 仅支持 arm64（2018 年以后的安卓机基本都支持），最低 Android 8.0
 
             引擎来自 [official-pikafish/Pikafish](https://github.com/official-pikafish/Pikafish)（GPL-3.0）。
           files: |
